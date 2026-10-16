@@ -40,12 +40,17 @@ class BaseAttack(ABC):
         self.host = host
         self.port = port
         self.unit_id = unit_id
-        self.client = AsyncModbusTcpClient(host, port=port)
+        # NOTE: AsyncModbusTcpClient calls asyncio.get_running_loop() internally
+        # in pymodbus 3.x, so we must NOT create it in __init__ (sync context).
+        # It is created lazily inside connect(), which is always awaited.
+        self.client: AsyncModbusTcpClient | None = None
         self.historian = historian
         self.transactions: list[ModbusTransaction] = []
 
     async def connect(self) -> bool:
-        """Connect to the target PLC."""
+        """Connect to the target PLC. Client is created here (async context)."""
+        # Create client lazily — must be inside an async context for pymodbus 3.x
+        self.client = AsyncModbusTcpClient(self.host, port=self.port)
         connected = await self.client.connect()
         if connected:
             logger.info("[%s] Connected to %s:%d", self.name, self.host, self.port)
@@ -55,7 +60,8 @@ class BaseAttack(ABC):
 
     async def cleanup(self) -> None:
         """Close the connection."""
-        self.client.close()
+        if self.client is not None:
+            self.client.close()
         logger.info("[%s] Connection closed", self.name)
 
     def _log_transaction(self, tx: ModbusTransaction) -> None:

@@ -1060,3 +1060,460 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+@cli.command("analyze-ml")
+@click.option("--limit", default=1000, type=int, help="Max transactions to analyze")
+@click.option("--ml-only", is_flag=True, help="Use only ML-based detection")
+@click.option("--rules-only", is_flag=True, help="Use only rule-based detection")
+@click.option("--forecast", is_flag=True, help="Include LSTM forecasting")
+def analyze_ml(limit: int, ml_only: bool, rules_only: bool, forecast: bool) -> None:
+    """Run enhanced anomaly detection with ML models."""
+    from ot_twin.environment.enhanced_anomaly_detector import EnhancedAnomalyDetector
+    from ot_twin.environment.historian import Historian
+    
+    console.print("[bold cyan]Enhanced ML Anomaly Detection[/]\n")
+    
+    # Determine detection mode
+    if ml_only and rules_only:
+        console.print("[bold red]Cannot use both --ml-only and --rules-only[/]")
+        return
+    
+    use_ml = not rules_only
+    use_rules = not ml_only
+    
+    console.print(f"Detection mode: {'ML only' if ml_only else 'Rules only' if rules_only else 'Combined'}")
+    console.print(f"Transaction limit: {limit}")
+    console.print(f"Forecasting: {'Enabled' if forecast else 'Disabled'}\n")
+    
+    # Initialize detector
+    detector = EnhancedAnomalyDetector(use_ml=use_ml)
+    
+    # Show capabilities
+    capabilities = detector.get_detection_capabilities()
+    cap_table = Table(title="Detection Capabilities")
+    cap_table.add_column("Type", style="cyan")
+    cap_table.add_column("Status", style="green")
+    cap_table.add_column("Methods")
+    
+    cap_table.add_row(
+        "Rule-Based",
+        "✅ Enabled" if capabilities["rule_based"]["enabled"] else "❌ Disabled",
+        ", ".join(capabilities["rule_based"]["detection_types"])
+    )
+    
+    ml_status = "✅ Loaded" if capabilities["ml_based"]["models_loaded"] else "⚠️ Not Loaded"
+    ml_status = "❌ Disabled" if not capabilities["ml_based"]["enabled"] else ml_status
+    cap_table.add_row(
+        "ML-Based",
+        ml_status,
+        ", ".join(capabilities["ml_based"]["detection_types"]) or "None"
+    )
+    
+    console.print(cap_table)
+    console.print()
+    
+    if use_ml and not capabilities["ml_based"]["models_loaded"]:
+        console.print("[bold yellow]Warning: ML models could not be loaded[/]")
+        console.print("Run 'ot-train-models' to train new models if needed.\n")
+    
+    # Run analysis
+    historian = Historian()
+    console.print("[bold]Analyzing historian data...[/]")
+    
+    results = detector.analyze(
+        historian, 
+        transaction_limit=limit,
+        include_forecast=forecast
+    )
+    
+    # Display results
+    console.print("\n[bold cyan]=== ANALYSIS RESULTS ===[/]\n")
+    
+    # Rule-based results
+    if use_rules and "rule_based" in results:
+        rule_data = results["rule_based"]
+        rule_table = Table(title="Rule-Based Detection")
+        rule_table.add_column("Severity", style="cyan")
+        rule_table.add_column("Category")
+        rule_table.add_column("Description")
+        rule_table.add_column("Time")
+        
+        for anomaly in rule_data.get("anomalies", [])[:10]:  # Show top 10
+            severity_color = {
+                "critical": "red",
+                "high": "yellow",
+                "medium": "blue",
+                "low": "white"
+            }.get(anomaly["severity"], "white")
+            
+            rule_table.add_row(
+                f"[{severity_color}]{anomaly['severity'].upper()}[/]",
+                anomaly["category"],
+                anomaly["description"],
+                anomaly["timestamp"][:19]
+            )
+        
+        if rule_table.rows:
+            console.print(rule_table)
+            console.print(f"Total rule-based anomalies: {rule_data.get('total_detected', 0)}")
+        else:
+            console.print("✅ No rule-based anomalies detected")
+        console.print()
+    
+    # ML-based results
+    if use_ml and "ml_based" in results and "error" not in results["ml_based"]:
+        ml_data = results["ml_based"]
+        
+        if "summary" in ml_data:
+            ml_summary = ml_data["summary"]
+            ml_table = Table(title="ML-Based Detection Summary")
+            ml_table.add_column("Metric", style="cyan")
+            ml_table.add_column("Value", style="green")
+            
+            ml_table.add_row("Transactions Analyzed", str(ml_summary.get("total_transactions_analyzed", 0)))
+            ml_table.add_row("Process States Analyzed", str(ml_summary.get("total_process_states_analyzed", 0)))
+            ml_table.add_row("ML Anomalies Detected", str(ml_summary.get("ml_anomalies_detected", 0)))
+            ml_table.add_row("Transaction Anomalies", str(ml_summary.get("transaction_anomalies", 0)))
+            ml_table.add_row("Forecast Anomalies", str(ml_summary.get("forecast_anomalies", 0)))
+            
+            console.print(ml_table)
+            
+            # Severity breakdown
+            if "severity_breakdown" in ml_summary:
+                severity_table = Table(title="ML Anomaly Severity Breakdown")
+                severity_table.add_column("Severity", style="cyan")
+                severity_table.add_column("Count", style="green")
+                
+                for severity, count in ml_summary["severity_breakdown"].items():
+                    if count > 0:
+                        severity_table.add_row(severity.upper(), str(count))
+                
+                if severity_table.rows:
+                    console.print(severity_table)
+        
+        # Show top ML anomalies
+        if "anomalies" in ml_data and ml_data["anomalies"]:
+            ml_anom_table = Table(title="Top ML Anomalies")
+            ml_anom_table.add_column("Severity", style="cyan")
+            ml_anom_table.add_column("Category")
+            ml_anom_table.add_column("Description")
+            ml_anom_table.add_column("Confidence", style="yellow")
+            
+            for anomaly in ml_data["anomalies"][:10]:  # Show top 10
+                severity_color = {
+                    "critical": "red",
+                    "high": "yellow",
+                    "medium": "blue",
+                    "low": "white"
+                }.get(anomaly["severity"], "white")
+                
+                ml_anom_table.add_row(
+                    f"[{severity_color}]{anomaly['severity'].upper()}[/]",
+                    anomaly["category"],
+                    anomaly["description"],
+                    f"{anomaly.get('confidence', 0):.2f}"
+                )
+            
+            console.print(ml_anom_table)
+        
+        # Show forecasts if enabled
+        if forecast and "forecasts" in ml_data and ml_data["forecasts"]:
+            forecast_table = Table(title="Sensor Forecasts (Next 5 steps)")
+            forecast_table.add_column("Step", style="cyan")
+            forecast_table.add_column("Time", style="green")
+            forecast_table.add_column("Tank Level", style="yellow")
+            forecast_table.add_column("pH", style="blue")
+            forecast_table.add_column("Pressure", style="magenta")
+            
+            for forecast_item in ml_data["forecasts"][:5]:
+                preds = forecast_item.get("predictions", {})
+                forecast_table.add_row(
+                    str(forecast_item.get("step", "")),
+                    forecast_item.get("timestamp", "")[11:16],
+                    f"{preds.get('tank_level', 0):.1f}%",
+                    f"{preds.get('ph_level', 0):.2f}",
+                    f"{preds.get('pressure_psi', 0):.1f} psi"
+                )
+            
+            console.print(forecast_table)
+        
+        console.print()
+    
+    # Combined results
+    if "combined" in results:
+        combined = results["combined"]
+        if "summary" in combined:
+            combo_table = Table(title="Combined Analysis")
+            combo_table.add_column("Metric", style="cyan")
+            combo_table.add_column("Value", style="green")
+            
+            combo_table.add_row("Total Rule Anomalies", str(combined["summary"].get("total_rule_anomalies", 0)))
+            combo_table.add_row("Total ML Anomalies", str(combined["summary"].get("total_ml_anomalies", 0)))
+            combo_table.add_row("Unique Anomalies", str(combined["summary"].get("unique_anomalies", 0)))
+            combo_table.add_row("Confirmed by Both", str(combined["summary"].get("confirmed_by_both", 0)))
+            combo_table.add_row("Rule Only", str(combined["summary"].get("rule_only", 0)))
+            combo_table.add_row("ML Only", str(combined["summary"].get("ml_only", 0)))
+            
+            console.print(combo_table)
+    
+    # Recommendations
+    if "recommendations" in results and results["recommendations"]:
+        console.print("\n[bold cyan]=== RECOMMENDATIONS ===[/]")
+        for rec in results["recommendations"]:
+            console.print(f"• {rec}")
+
+
+@cli.command("train-models")
+@click.option("--samples", default=10000, type=int, help="Number of training samples")
+@click.option("--retrain", is_flag=True, help="Retrain even if models exist")
+def train_models(samples: int, retrain: bool) -> None:
+    """Train ML models (Isolation Forest and LSTM) from historian data."""
+    from ot_twin.environment.historian import Historian
+    from ot_twin.environment.ml_model_trainer import MLModelTrainer
+    
+    console.print("[bold cyan]Training ML Models[/]\n")
+    
+    # Check if models already exist
+    isolation_path = "isolation_forest_model.pkl"
+    lstm_path = "lstm.h5"
+    
+    models_exist = False
+    if not retrain:
+        import os
+        if os.path.exists(isolation_path) and os.path.exists(lstm_path):
+            iso_size = os.path.getsize(isolation_path)
+            lstm_size = os.path.getsize(lstm_path)
+            if iso_size > 0 and lstm_size > 0:
+                models_exist = True
+                console.print("✓ Existing models found")
+                console.print(f"  • Isolation Forest: {iso_size:,} bytes")
+                console.print(f"  • LSTM: {lstm_size:,} bytes")
+                console.print("\nUse --retrain flag to force retraining.")
+                return
+    
+    # Initialize trainer
+    historian = Historian()
+    trainer = MLModelTrainer(historian=historian)
+    
+    # Train models
+    console.print(f"Training with up to {samples:,} samples from historian...")
+    
+    try:
+        # Train Isolation Forest
+        console.print("\n[bold]Training Isolation Forest...[/]")
+        iso_success = trainer.train_isolation_forest(sample_size=samples)
+        
+        if iso_success:
+            console.print("✓ Isolation Forest trained successfully")
+        else:
+            console.print("✗ Failed to train Isolation Forest")
+        
+        # Train LSTM
+        console.print("\n[bold]Training LSTM...[/]")
+        lstm_success = trainer.train_lstm(sample_size=samples)
+        
+        if lstm_success:
+            console.print("✓ LSTM trained successfully")
+        else:
+            console.print("✗ Failed to train LSTM")
+        
+        # Summary
+        console.print("\n[bold green]Training Complete[/]")
+        if iso_success and lstm_success:
+            console.print("✓ Both models trained successfully")
+        elif iso_success or lstm_success:
+            console.print("⚠ Partial success - some models trained")
+        else:
+            console.print("✗ Training failed for all models")
+            
+    except Exception as e:
+        console.print(f"\n[bold red]Training error:[/] {e}")
+        console.print("Make sure all dependencies are installed:")
+        console.print("  pip install scikit-learn pandas numpy tensorflow")
+
+
+@cli.command("model-info")
+def model_info() -> None:
+    """Show information about ML models."""
+    from ot_twin.environment.ml_anomaly_detector import MLAnomalyDetector
+    
+    console.print("[bold cyan]ML Model Information[/]\n")
+    
+    detector = MLAnomalyDetector()
+    loaded = detector.load_models()
+    
+    info_table = Table(title="Model Status")
+    info_table.add_column("Model", style="cyan")
+    info_table.add_column("Status", style="green")
+    info_table.add_column("Path")
+    info_table.add_column("Size")
+    
+    import os
+    from pathlib import Path
+    
+    # Isolation Forest
+    iso_path = Path("isolation_forest_model.pkl")
+    if iso_path.exists():
+        size = iso_path.stat().st_size
+        status = "✅ Loaded" if detector.isolation_forest is not None else "⚠️ File exists"
+        info_table.add_row(
+            "Isolation Forest",
+            status,
+            str(iso_path),
+            f"{size:,} bytes"
+        )
+    else:
+        info_table.add_row(
+            "Isolation Forest",
+            "❌ Not found",
+            str(iso_path),
+            "N/A"
+        )
+    
+    # LSTM
+    lstm_path = Path("lstm.h5")
+    if lstm_path.exists():
+        size = lstm_path.stat().st_size
+        status = "✅ Loaded" if detector.lstm_model is not None else "⚠️ File exists"
+        info_table.add_row(
+            "LSTM",
+            status,
+            str(lstm_path),
+            f"{size:,} bytes"
+        )
+    else:
+        info_table.add_row(
+            "LSTM",
+            "❌ Not found",
+            str(lstm_path),
+            "N/A"
+        )
+    
+    console.print(info_table)
+    
+    # Feature information
+    if loaded:
+        console.print("\n[bold]Detection Features:[/]")
+        console.print(f"• Transaction features: {len(detector.transaction_features)}")
+        console.print(f"• Sensor features: {len(detector.sensor_features)}")
+        console.print(f"• LSTM window size: {detector.window_size}")
+        
+        # Model details
+        if detector.isolation_forest:
+            console.print("\n[bold]Isolation Forest Details:[/]")
+            console.print(f"• Estimators: {detector.isolation_forest.n_estimators}")
+            console.print(f"• Contamination: {detector.isolation_forest.contamination}")
+        
+        if detector.lstm_model:
+            console.print("\n[bold]LSTM Details:[/]")
+            console.print(f"• Layers: {len(detector.lstm_model.layers)}")
+            console.print(f"• Parameters: {detector.lstm_model.count_params():,}")
+    else:
+        console.print("\n[bold yellow]Models not loaded. Run 'train-models' first.[/]")
+
+
+@cli.command("forecast")
+@click.option("--steps", default=10, type=int, help="Number of forecast steps")
+@click.option("--interval", default=5, type=int, help="Minutes between forecast steps")
+def forecast(steps: int, interval: int) -> None:
+    """Generate sensor value forecasts using LSTM."""
+    from ot_twin.environment.enhanced_anomaly_detector import EnhancedAnomalyDetector
+    from ot_twin.environment.historian import Historian
+    
+    console.print(f"[bold cyan]LSTM Sensor Forecast ({steps} steps, {interval} min intervals)[/]\n")
+    
+    detector = EnhancedAnomalyDetector(use_ml=True)
+    historian = Historian()
+    
+    # Check if LSTM is available
+    if not detector.ml_loaded:
+        console.print("[bold red]LSTM model not loaded[/]")
+        console.print("Run 'train-models' to train models first.")
+        return
+    
+    console.print("[bold]Loading historical data...[/]")
+    
+    # Get recent process states
+    states = historian.get_recent_process_states(min(steps * 10, 500))
+    if len(states) < 10:
+        console.print(f"[bold yellow]Warning: Only {len(states)} process states available[/]")
+        console.print("Need at least 10 states for accurate forecasting.")
+        console.print("Run the system longer to collect more data.")
+        return
+    
+    # Convert to ProcessState objects
+    from ot_twin.models import ProcessState
+    from datetime import datetime
+    
+    state_objects = []
+    for state in states:
+        state_objects.append(ProcessState(
+            timestamp=datetime.fromisoformat(state["timestamp"]),
+            tank_level=state["tank_level"],
+            inflow_rate=state["inflow_rate"],
+            outflow_rate=state["outflow_rate"],
+            ph_level=state["ph_level"],
+            chlorine_dosing=state["chlorine_dosing"],
+            turbidity=state["turbidity"],
+            pressure_psi=state["pressure_psi"],
+            temperature_c=state["temperature_c"],
+            inlet_valve_open=bool(state["inlet_valve_open"]),
+            outlet_valve_open=bool(state["outlet_valve_open"]),
+            pump_running=bool(state["pump_running"]),
+            mixer_running=bool(state["mixer_running"])
+        ))
+    
+    # Run forecasting
+    console.print("[bold]Generating forecasts...[/]\n")
+    
+    forecasts, anomalies = detector.ml_detector.forecast_sensor_values(
+        state_objects,
+        forecast_steps=steps
+    )
+    
+    # Display forecasts
+    if forecasts:
+        forecast_table = Table(title="Sensor Value Forecast")
+        forecast_table.add_column("Step", style="cyan")
+        forecast_table.add_column("Time", style="green")
+        forecast_table.add_column("Tank %", style="yellow")
+        forecast_table.add_column("pH", style="blue")
+        forecast_table.add_column("Pressure", style="magenta")
+        forecast_table.add_column("Temp °C", style="cyan")
+        
+        for fc in forecasts[:steps]:
+            preds = fc.get("predictions", {})
+            forecast_table.add_row(
+                str(fc.get("step", "")),
+                fc.get("timestamp", "")[11:16],
+                f"{preds.get('tank_level', 0):.1f}",
+                f"{preds.get('ph_level', 0):.2f}",
+                f"{preds.get('pressure_psi', 0):.1f}",
+                f"{preds.get('temperature_c', 0):.1f}"
+            )
+        
+        console.print(forecast_table)
+        
+        # Show forecast trends
+        console.print("\n[bold]Forecast Trends:[/]")
+        
+        tank_values = [f["predictions"]["tank_level"] for f in forecasts[:steps]]
+        ph_values = [f["predictions"]["ph_level"] for f in forecasts[:steps]]
+        pressure_values = [f["predictions"]["pressure_psi"] for f in forecasts[:steps]]
+        
+        console.print(f"• Tank level: {tank_values[0]:.1f}% → {tank_values[-1]:.1f}% " + 
+                     f"({'+' if tank_values[-1] > tank_values[0] else ''}{tank_values[-1] - tank_values[0]:.1f}%)")
+        console.print(f"• pH: {ph_values[0]:.2f} → {ph_values[-1]:.2f} " + 
+                     f"({'+' if ph_values[-1] > ph_values[0] else ''}{ph_values[-1] - ph_values[0]:.2f})")
+        console.print(f"• Pressure: {pressure_values[0]:.1f} psi → {pressure_values[-1]:.1f} psi " + 
+                     f"({'+' if pressure_values[-1] > pressure_values[0] else ''}{pressure_values[-1] - pressure_values[0]:.1f} psi)")
+    
+    # Show anomalies if any
+    if anomalies:
+        console.print("\n[bold red]Forecast Anomalies Detected:[/]")
+        for anomaly in anomalies[:5]:  # Show top 5
+            console.print(f"• {anomaly.description} (confidence: {anomaly.confidence:.2f})")
+    
+    if not forecasts and not anomalies:
+        console.print("[bold yellow]No forecasts generated[/]")
+        console.print("The LSTM model may need more training data.")

@@ -4,6 +4,8 @@ PLC Slave — Modbus TCP server simulating a water treatment plant PLC.
 Runs a pymodbus async server with a background process simulation loop that
 updates input registers and discrete inputs based on the process model, while
 holding registers and coils are writable by SCADA (or attackers).
+
+Ported to pymodbus 3.x native SimDevice/SimData API.
 """
 
 from __future__ import annotations
@@ -12,12 +14,9 @@ import asyncio
 import logging
 from typing import Any
 
-from pymodbus.datastore import (
-    ModbusDeviceContext,
-    ModbusSequentialDataBlock,
-    ModbusServerContext,
-)
 from pymodbus.server import StartAsyncTcpServer
+from pymodbus.simulator.simdata import DataType, SimData
+from pymodbus.simulator.simdevice import SimDevice
 
 from ot_twin.config import PLC_HOST, PLC_PORT, PLC_UNIT_ID, PROCESS_TICK_SECONDS
 from ot_twin.environment.process_model import WaterTreatmentProcess
@@ -30,23 +29,101 @@ from ot_twin.environment.register_map import (
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Internal register store — plain Python dicts keyed by address.
+# pymodbus 3.x action callbacks read/write these directly.
+# ---------------------------------------------------------------------------
+_coils: dict[int, bool] = {}
+_discrete_inputs: dict[int, bool] = {}
+_holding_registers: dict[int, int] = {}
+_input_registers: dict[int, int] = {}
 
-def _build_data_block(
-    entries: list[Any], size: int, *, is_bool: bool = False,
-) -> ModbusSequentialDataBlock:
-    """Create a data block initialized with default values."""
-    if is_bool:
-        values = [False] * size
-        for entry in entries:
-            if entry.address < size:
-                values[entry.address] = bool(int(entry.default_value))
+
+def _init_stores() -> None:
+    """Populate register stores with default values from the register map."""
+    for entry in COILS:
+        _coils[entry.address] = bool(int(entry.default_value))
+    for entry in DISCRETE_INPUTS:
+        _discrete_inputs[entry.address] = bool(int(entry.default_value))
+    for entry in HOLDING_REGISTERS:
+        _holding_registers[entry.address] = int(entry.default_value)
+    for entry in INPUT_REGISTERS:
+        _input_registers[entry.address] = int(entry.default_value)
+
+
+# ---------------------------------------------------------------------------
+# SimDevice action callback — intercepts every Modbus read/write.
+# ---------------------------------------------------------------------------
+async def _modbus_action(
+    function_code: int,
+    start_address: int,
+    address: int,
+    count: int,
+    current_registers: list[int],
+    set_values: list[int] | list[bool] | None,
+) -> None:
+    """
+    Called by pymodbus for every request.
+
+    - Reads  (set_values is None)  → fill current_registers from our store.
+    - Writes (set_values is not None) → copy set_values into our store.
+
+    Function codes:
+      FC 1  = Read Coils
+      FC 2  = Read Discrete Inputs
+      FC 3  = Read Holding Registers
+      FC 4  = Read Input Registers
+      FC 5  = Write Single Coil
+      FC 6  = Write Single Holding Register
+      FC 15 = Write Multiple Coils
+      FC 16 = Write Multiple Holding Registers
+    """
+    is_coil  = function_code in (1, 5, 15)
+    is_di    = function_code == 2
+    is_hr    = function_code in (3, 6, 16, 22, 23)
+    is_ir    = function_code == 4
+
+    if set_values is None:
+        # --- READ ---
+        for i in range(count):
+            addr = address + i
+            if is_coil:
+                current_registers[i] = int(_coils.get(addr, False))
+            elif is_di:
+                current_registers[i] = int(_discrete_inputs.get(addr, False))
+            elif is_hr:
+                current_registers[i] = _holding_registers.get(addr, 0)
+            elif is_ir:
+                current_registers[i] = _input_registers.get(addr, 0)
     else:
-        values = [0] * size
-        for entry in entries:
-            if entry.address < size:
-                values[entry.address] = int(entry.default_value)
-    # pymodbus uses 1-based addressing internally; address=0 -> offset 0
-    return ModbusSequentialDataBlock(0, values)
+        # --- WRITE ---
+        for i, val in enumerate(set_values):
+            addr = address + i
+            if is_coil:
+                _coils[addr] = bool(val)
+            elif is_hr:
+                _holding_registers[addr] = int(val)
+
+
+def _build_simdevice(unit_id: int) -> SimDevice:
+    """Build a SimDevice covering all four register spaces."""
+    # We define one large REGISTERS block for HR (0..99) and IR (0..49),
+    # and BITS blocks for Coils (0..15) and DI (0..15).
+    # The action callback will serve the actual values from our dicts.
+    return SimDevice(
+        id=unit_id,
+        action=_modbus_action,
+        simdata=(
+            # Coils (FC 1/5/15) — 16 bits
+            [SimData(address=0, count=16, values=[False] * 16, datatype=DataType.BITS)],
+            # Discrete Inputs (FC 2) — 16 bits
+            [SimData(address=0, count=16, values=[False] * 16, datatype=DataType.BITS)],
+            # Holding Registers (FC 3/6/16) — 100 registers
+            [SimData(address=0, count=100, values=0, datatype=DataType.REGISTERS)],
+            # Input Registers (FC 4) — 50 registers
+            [SimData(address=0, count=50, values=0, datatype=DataType.REGISTERS)],
+        ),
+    )
 
 
 class PLCSlave:
@@ -64,16 +141,11 @@ class PLCSlave:
         self._server_task: asyncio.Task | None = None
         self._sim_task: asyncio.Task | None = None
 
-        # Build data store
-        self.context = ModbusDeviceContext(
-            di=_build_data_block(DISCRETE_INPUTS, 16, is_bool=True),
-            co=_build_data_block(COILS, 16, is_bool=True),
-            hr=_build_data_block(HOLDING_REGISTERS, 100),
-            ir=_build_data_block(INPUT_REGISTERS, 50),
-        )
-        self.server_context = ModbusServerContext(
-            devices={PLC_UNIT_ID: self.context}, single=False
-        )
+        # Initialise internal register stores
+        _init_stores()
+
+        # Build SimDevice (new pymodbus 3.x API)
+        self._simdevice = _build_simdevice(PLC_UNIT_ID)
 
     async def start(self) -> None:
         """Start the PLC server and simulation loop."""
@@ -83,7 +155,7 @@ class PLCSlave:
         self._sim_task = asyncio.create_task(self._simulation_loop())
 
         await StartAsyncTcpServer(
-            context=self.server_context,
+            context=self._simdevice,
             address=(self.host, self.port),
         )
 
@@ -95,7 +167,7 @@ class PLCSlave:
         self._sim_task = asyncio.create_task(self._simulation_loop())
         self._server_task = asyncio.create_task(
             StartAsyncTcpServer(
-                context=self.server_context,
+                context=self._simdevice,
                 address=(self.host, self.port),
             )
         )
@@ -119,42 +191,40 @@ class PLCSlave:
                 pass
         logger.info("PLC Slave stopped")
 
+    # ------------------------------------------------------------------
+    # Internal helpers — read/write our own register store directly.
+    # ------------------------------------------------------------------
+
     def _read_coil(self, address: int) -> bool:
-        """Read a coil value from the data store."""
-        values = self.context.getValues(1, address, count=1)  # FC 1
-        return bool(values[0])
+        return _coils.get(address, False)
 
     def _read_holding(self, address: int) -> int:
-        """Read a holding register from the data store."""
-        values = self.context.getValues(3, address, count=1)  # FC 3
-        return int(values[0])
+        return _holding_registers.get(address, 0)
 
     def _write_input_register(self, address: int, value: int) -> None:
-        """Write to an input register (process → PLC direction)."""
-        self.context.setValues(4, address, [value])  # FC 4
+        _input_registers[address] = value
 
     def _write_discrete_input(self, address: int, value: bool) -> None:
-        """Write to a discrete input (process → PLC direction)."""
-        self.context.setValues(2, address, [value])  # FC 2
+        _discrete_inputs[address] = value
 
     async def _simulation_loop(self) -> None:
         """Periodically advance the process model and sync registers."""
         while self._running:
             try:
                 # Read actuator commands from coils / holding registers
-                inlet_valve = self._read_coil(0)
+                inlet_valve  = self._read_coil(0)
                 outlet_valve = self._read_coil(1)
-                pump_enable = self._read_coil(2)
+                pump_enable  = self._read_coil(2)
                 mixer_enable = self._read_coil(3)
                 chlorine_pump = self._read_coil(4)
-                estop = self._read_coil(5)
+                estop        = self._read_coil(5)
 
-                inflow_sp = self._read_holding(1)
-                outflow_sp = self._read_holding(2)
-                ph_sp = self._read_holding(3) / 100.0
+                inflow_sp   = self._read_holding(1)
+                outflow_sp  = self._read_holding(2)
+                ph_sp       = self._read_holding(3) / 100.0
                 chlorine_sp = self._read_holding(4) / 100.0
                 pressure_sp = self._read_holding(5)
-                temp_sp = self._read_holding(6) / 10.0
+                temp_sp     = self._read_holding(6) / 10.0
 
                 # Tick the process model
                 state = self.process.tick(

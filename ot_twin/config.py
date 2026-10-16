@@ -44,6 +44,10 @@ AZURE_OPENAI_API_VERSION: str = os.getenv(
     "AZURE_OPENAI_API_VERSION", "2024-02-15-preview"
 )
 
+# OpenRouter (primary LLM provider)
+OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "")
+OPENROUTER_MODEL: str = os.getenv("OPENROUTER_MODEL", "openai/gpt-4o")
+
 # OpenAI (fallback)
 OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
 OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4")
