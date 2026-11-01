@@ -53,7 +53,7 @@ class MLModelTrainer:
             transactions = self.historian.get_recent_transactions(sample_size)
             
             if len(transactions) < 100:
-                print(f"⚠ Only {len(transactions)} transactions available (need at least 100)")
+                print(f"Warning: only {len(transactions)} transactions available (need at least 100)")
                 return False
             
             print(f"Processing {len(transactions)} transactions...")
@@ -112,13 +112,17 @@ class MLModelTrainer:
             # Save model
             model_path = self.model_dir / "isolation_forest_model.pkl"
             with open(model_path, 'wb') as f:
-                pickle.dump(model, f)
+                pickle.dump({
+                    "model": model,
+                    "scaler": scaler,
+                    "features": self.transaction_features,
+                }, f)
             
-            print(f"✓ Isolation Forest saved to {model_path}")
+            print(f"Isolation Forest saved to {model_path}")
             return True
             
         except Exception as e:
-            print(f"✗ Error training Isolation Forest: {e}")
+            print(f"Error training Isolation Forest: {e}")
             return False
     
     def train_lstm(
@@ -134,7 +138,7 @@ class MLModelTrainer:
             states = self.historian.get_recent_process_states(sample_size)
             
             if len(states) < window_size * 2:
-                print(f"⚠ Only {len(states)} states available (need at least {window_size * 2})")
+                print(f"Warning: only {len(states)} states available (need at least {window_size * 2})")
                 return False
             
             print(f"Processing {len(states)} process states...")
@@ -158,7 +162,7 @@ class MLModelTrainer:
                     continue
             
             if len(data) < window_size * 2:
-                print(f"✗ Insufficient valid data points: {len(data)}")
+                print(f"Insufficient valid data points: {len(data)}")
                 return False
             
             df = pd.DataFrame(data)
@@ -180,7 +184,7 @@ class MLModelTrainer:
             y = np.array(y)
             
             if len(X) < 32:
-                print(f"✗ Insufficient sequences: {len(X)}")
+                print(f"Insufficient sequences: {len(X)}")
                 return False
             
             print(f"Training LSTM ({len(X)} sequences, window={window_size})...")
@@ -211,11 +215,11 @@ class MLModelTrainer:
             model_path = self.model_dir / "lstm.h5"
             model.save(model_path)
             
-            print(f"✓ LSTM saved to {model_path}")
+            print(f"LSTM saved to {model_path}")
             print(f"  Final loss: {history.history['loss'][-1]:.4f}")
             
             return True
             
         except Exception as e:
-            print(f"✗ Error training LSTM: {e}")
+            print(f"Error training LSTM: {e}")
             return False

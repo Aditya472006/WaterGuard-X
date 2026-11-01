@@ -445,8 +445,18 @@ def render_ml_detection_engine():
         st.metric("Detection Mode", "Hybrid", help="Rule-based + ML models")
     
     with col2:
-        if enhanced_detector.ml_loaded:
-            st.metric("ML Models", "✅ LOADED", help="Both Isolation Forest and LSTM")
+        ml_detector = enhanced_detector.ml_detector
+        if enhanced_detector.ml_loaded and ml_detector is not None:
+            available_models = []
+            if ml_detector.isolation_forest is not None:
+                available_models.append("Isolation Forest")
+            if ml_detector.lstm_model is not None:
+                available_models.append("LSTM")
+            st.metric(
+                "ML Models",
+                "✅ LOADED",
+                help=f"Available: {', '.join(available_models)}"
+            )
         else:
             st.metric("ML Models", "⚠️ NOT LOADED", help="Train models first")
     

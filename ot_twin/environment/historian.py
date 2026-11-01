@@ -188,6 +188,10 @@ class Historian:
             ).fetchall()
             return [dict(r) for r in rows]
 
+    def get_recent_process_states(self, limit: int = 50) -> list[dict]:
+        """Retrieve recent process states in chronological order."""
+        return list(reversed(self.get_recent_snapshots(limit)))
+
     def get_attack_history(self, limit: int = 20) -> list[dict]:
         """Retrieve the most recent attack results."""
         with self._lock, self._get_conn() as conn:

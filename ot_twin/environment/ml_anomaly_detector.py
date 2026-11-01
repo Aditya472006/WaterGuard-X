@@ -9,6 +9,7 @@ capabilities for more sophisticated anomaly detection.
 from __future__ import annotations
 
 import json
+import logging
 import pickle
 import warnings
 from dataclasses import dataclass, field
@@ -26,6 +27,8 @@ from ot_twin.environment.historian import Historian
 from ot_twin.models import ModbusTransaction, ProcessState, RegisterType
 
 warnings.filterwarnings('ignore', category=UserWarning)
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -58,8 +61,8 @@ class MLAnomalyDetector:
         
         # Feature configuration
         self.transaction_features = [
-            'function_code', 'register_type_code', 'address', 'count', 
-            'is_write', 'is_attack', 'hour_of_day', 'minute_of_hour'
+            'function_code', 'register_type_code', 'address', 'count',
+            'is_write', 'hour_of_day', 'minute_of_hour', 'value_mean', 'value_std'
         ]
         
         # Sensor features for LSTM
@@ -72,35 +75,54 @@ class MLAnomalyDetector:
     
     def load_models(self) -> bool:
         """Load pre-trained ML models from disk."""
-        try:
-            # Load Isolation Forest model
-            isolation_forest_path = self.model_dir / "isolation_forest_model.pkl"
-            if isolation_forest_path.exists():
+        self.isolation_forest = None
+        self.feature_scaler = None
+        self.lstm_model = None
+
+        isolation_forest_path = self.model_dir / "isolation_forest_model.pkl"
+        if isolation_forest_path.exists():
+            try:
                 with open(isolation_forest_path, 'rb') as f:
-                    self.isolation_forest = pickle.load(f)
-                print(f"✓ Loaded Isolation Forest model from {isolation_forest_path}")
-            else:
-                print(f"⚠ Isolation Forest model not found at {isolation_forest_path}")
-                return False
-            
-            # Load LSTM model
-            lstm_path = self.model_dir / "lstm.h5"
-            if lstm_path.exists() and lstm_path.stat().st_size > 0:
+                    model_data = pickle.load(f)
+
+                if isinstance(model_data, dict) and "model" in model_data:
+                    model = model_data["model"]
+                    scaler = model_data.get("scaler")
+                    features = model_data.get("features")
+                    if features is not None and list(features) != self.transaction_features:
+                        raise ValueError(
+                            "Isolation Forest feature list does not match the detector"
+                        )
+                    self.feature_scaler = scaler
+                else:
+                    model = model_data
+
+                expected_features = getattr(model, "n_features_in_", None)
+                if expected_features is not None and expected_features != len(self.transaction_features):
+                    raise ValueError(
+                        f"Isolation Forest expects {expected_features} features; "
+                        f"the detector provides {len(self.transaction_features)}"
+                    )
+
+                self.isolation_forest = model
+                logger.info("Loaded Isolation Forest model from %s", isolation_forest_path)
+            except (OSError, pickle.UnpicklingError, EOFError, ValueError, TypeError):
+                logger.exception("Could not load Isolation Forest model from %s", isolation_forest_path)
+        else:
+            logger.warning("Isolation Forest model not found at %s", isolation_forest_path)
+
+        lstm_path = self.model_dir / "lstm.h5"
+        if lstm_path.exists() and lstm_path.stat().st_size > 0:
+            try:
                 self.lstm_model = keras.models.load_model(lstm_path)
-                print(f"✓ Loaded LSTM model from {lstm_path}")
-            else:
-                print(f"⚠ LSTM model not found or empty at {lstm_path}")
-                # We'll still work with just Isolation Forest
-            
-            # Initialize feature scaler
-            self.feature_scaler = StandardScaler()
-            
-            self.is_loaded = True
-            return True
-            
-        except Exception as e:
-            print(f"Error loading ML models: {e}")
-            return False
+                logger.info("Loaded LSTM model from %s", lstm_path)
+            except (OSError, ValueError, TypeError):
+                logger.exception("Could not load LSTM model from %s", lstm_path)
+        else:
+            logger.warning("LSTM model not found or empty at %s", lstm_path)
+
+        self.is_loaded = self.isolation_forest is not None or self.lstm_model is not None
+        return self.is_loaded
     
     def _extract_transaction_features(self, transactions: list[ModbusTransaction]) -> pd.DataFrame:
         """Extract features from Modbus transactions for ML analysis."""
@@ -248,6 +270,8 @@ class MLAnomalyDetector:
             Tuple of (forecasted_values, anomalies)
         """
         if not self.is_loaded or self.lstm_model is None:
+            return [], []
+        if not process_states:
             return [], []
         
         anomalies = []

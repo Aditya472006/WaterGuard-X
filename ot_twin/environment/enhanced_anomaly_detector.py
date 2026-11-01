@@ -150,8 +150,9 @@ class EnhancedAnomalyDetector:
             all_recommendations.extend(ml_results.get("recommendations", []))
         
         # Cross-validation recommendations
-        cross_val = combined_analysis.get("cross_validation", {})
-        confirmed_anomalies = cross_val.get("confirmed_by_both", 0)
+        confirmed_anomalies = combined_analysis.get("summary", {}).get(
+            "confirmed_by_both", 0
+        )
         if confirmed_anomalies > 0:
             all_recommendations.append(
                 f"✅ {confirmed_anomalies} anomalies confirmed by both rule-based and ML detection"
